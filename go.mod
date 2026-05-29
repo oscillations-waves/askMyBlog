@@ -1,6 +1,6 @@
 module github.com/oscillations-waves/askmyblog-go
 
-go 1.25.0
+go 1.23
 
 require (
 	github.com/adrg/frontmatter v0.2.0

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Build stage: compile Go binaries (no CGo, pure-Go wasm sqlite).
-FROM golang:1.23-bookworm AS build
+FROM golang:1.25-bookworm AS build
 WORKDIR /src
 
 COPY go.mod go.sum ./
