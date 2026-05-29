@@ -1,0 +1,14 @@
+# build artifacts
+askmyblog
+index
+/out/
+
+# generated DB (rebuilt at deploy time)
+blog.db
+
+# secrets / env
+.env
+.env.*
+
+# macOS
+.DS_Store
