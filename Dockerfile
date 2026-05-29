@@ -7,8 +7,8 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/askmyblog .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/index ./cmd/index
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/askmyblog . && \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/index ./cmd/index
 
 # ─────────────── runtime ───────────────
 # debian-slim gives us git + sh for the startup indexer without build secrets.
