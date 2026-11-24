@@ -20,11 +20,17 @@ Keep your answer concise and accurate. Use markdown formatting where helpful.`
 type Engine struct {
 	DB    *db.DB
 	Embed *embed.Client
+	Model string
 }
 
 // NewEngine wires retrieval with the embedding/generation client.
 func NewEngine(d *db.DB, e *embed.Client) *Engine {
-	return &Engine{DB: d, Embed: e}
+	return &Engine{DB: d, Embed: e, Model: embed.GenModel}
+}
+
+// Generate streams a concise answer using the retrieved blog excerpts.
+func (e *Engine) Generate(ctx context.Context, question string, chunks []db.Result, yield func(string) error) error {
+	return e.Embed.Generate(ctx, e.Model, SystemPrompt, BuildPrompt(question, chunks), yield)
 }
 
 // Retrieve returns the top-k chunks nearest to the question.

@@ -21,10 +21,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
 COPY --from=build /out/askmyblog ./askmyblog
 COPY --from=build /out/index     ./index
 COPY entrypoint.sh               ./entrypoint.sh
+COPY prebuilt/                   ./prebuilt/
 RUN chmod +x ./entrypoint.sh
 
 ENV PORT=7860
-ENV DB_PATH=/app/blog.db
 ENV BLOG_REPO=https://github.com/oscillations-waves/shravani.roy.git
 EXPOSE 7860
 
