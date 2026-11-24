@@ -3,11 +3,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/adrg/frontmatter"
 	"github.com/oscillations-waves/askmyblog-go/internal/chunk"
@@ -22,41 +24,72 @@ type meta struct {
 }
 
 func main() {
+	if err := run(context.Background()); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("\n✅ Done.")
+}
+
+func run(ctx context.Context) (err error) {
+	timeout, err := time.ParseDuration(envOr("INDEX_TIMEOUT", "10m"))
+	if err != nil || timeout <= 0 {
+		return fmt.Errorf("INDEX_TIMEOUT must be a positive duration, such as 10m")
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	blogPath := envOr("BLOG_PATH", "../../shravani.roy/src/content/blog")
 	dbPath := envOr("DB_PATH", "./blog.db")
 	apiKey := os.Getenv("GEMINI_API_KEY")
 	if apiKey == "" {
-		log.Fatal("GEMINI_API_KEY is not set")
+		return fmt.Errorf("GEMINI_API_KEY is not set")
 	}
 
-	ctx := context.Background()
 	store, err := db.Open(dbPath)
 	if err != nil {
-		log.Fatalf("open db: %v", err)
+		return fmt.Errorf("open db: %w", err)
 	}
-	defer store.Close()
+	defer func() { err = errors.Join(err, store.Close()) }()
 
 	ec, err := embed.New(ctx, apiKey)
 	if err != nil {
-		log.Fatalf("embed client: %v", err)
+		return fmt.Errorf("embed client: %w", err)
 	}
 
 	files, err := findMarkdown(blogPath)
 	if err != nil {
-		log.Fatalf("walk %s: %v", blogPath, err)
+		return fmt.Errorf("walk %s: %w", blogPath, err)
 	}
 	if len(files) == 0 {
-		log.Fatalf("no markdown files in %s", blogPath)
+		return fmt.Errorf("no markdown files in %s", blogPath)
 	}
 
 	fmt.Printf("\n🔍 Found %d post(s) in %s\n\n", len(files), blogPath)
 
+	var failures []error
 	for _, f := range files {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("indexing stopped: %w", err)
+		}
 		if err := indexFile(ctx, store, ec, f); err != nil {
 			log.Printf("  ✗ %s: %v", f, err)
+			failures = append(failures, fmt.Errorf("%s: %w", f, err))
 		}
 	}
-	fmt.Println("\n✅ Done.")
+	if len(failures) > 0 {
+		return fmt.Errorf("indexing failed for %d of %d post(s): %w", len(failures), len(files), errors.Join(failures...))
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("indexing stopped: %w", err)
+	}
+	count, err := store.Count()
+	if err != nil {
+		return fmt.Errorf("validate index: %w", err)
+	}
+	if count == 0 {
+		return fmt.Errorf("no indexed chunks; check that the blog contains searchable text")
+	}
+	return nil
 }
 
 func indexFile(ctx context.Context, store *db.DB, ec *embed.Client, path string) error {
@@ -88,12 +121,8 @@ func indexFile(ctx context.Context, store *db.DB, ec *embed.Client, path string)
 		return nil
 	}
 
-	if err := store.ClearSlug(slug); err != nil {
-		return fmt.Errorf("clear slug: %w", err)
-	}
-
 	const batch = 20
-	inserted := 0
+	var embeddings [][]float32
 	for i := 0; i < len(chunks); i += batch {
 		end := i + batch
 		if end > len(chunks) {
@@ -103,26 +132,37 @@ func indexFile(ctx context.Context, store *db.DB, ec *embed.Client, path string)
 		for j, c := range chunks[i:end] {
 			texts[j] = c.Text
 		}
-		embeddings, err := ec.Batch(ctx, texts)
+		vectors, err := ec.Batch(ctx, texts)
 		if err != nil {
 			return fmt.Errorf("embed batch: %w", err)
 		}
-		for j, c := range chunks[i:end] {
-			_, err := store.Insert(db.Chunk{
-				Slug:       slug,
-				Title:      title,
-				Date:       date,
-				Tags:       tags,
-				ChunkIndex: c.Index,
-				Content:    c.Text,
-			}, embeddings[j])
-			if err != nil {
-				return fmt.Errorf("insert: %w", err)
-			}
-			inserted++
+		if len(vectors) != len(texts) {
+			return fmt.Errorf("embed batch: got %d vectors for %d chunks", len(vectors), len(texts))
+		}
+		embeddings = append(embeddings, vectors...)
+	}
+
+	// Finish every upstream request before replacing a previously indexed post.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := store.ClearSlug(slug); err != nil {
+		return fmt.Errorf("clear slug: %w", err)
+	}
+	for i, c := range chunks {
+		_, err := store.Insert(db.Chunk{
+			Slug:       slug,
+			Title:      title,
+			Date:       date,
+			Tags:       tags,
+			ChunkIndex: c.Index,
+			Content:    c.Text,
+		}, embeddings[i])
+		if err != nil {
+			return fmt.Errorf("insert: %w", err)
 		}
 	}
-	fmt.Printf("  ✓ %s — %d chunk(s)\n", slug, inserted)
+	fmt.Printf("  ✓ %s — %d chunk(s)\n", slug, len(chunks))
 	return nil
 }
 

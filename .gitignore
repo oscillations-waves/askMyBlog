@@ -1,6 +1,6 @@
 # build artifacts
 askmyblog
-index
+/index
 /out/
 
 # generated DB (rebuilt at deploy time)

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"sync"
 
 	_ "github.com/asg017/sqlite-vec-go-bindings/ncruces" // provides sqlite3.Binary with vec0 built in
 	"github.com/ncruces/go-sqlite3"
@@ -28,7 +29,9 @@ type Result struct {
 }
 
 // DB owns a single sqlite connection with sqlite-vec loaded.
+// Its operations are serialized because the connection is not concurrency-safe.
 type DB struct {
+	mu   sync.Mutex
 	conn *sqlite3.Conn
 }
 
@@ -61,10 +64,39 @@ func Open(path string) (*DB, error) {
 }
 
 // Close releases the underlying connection.
-func (d *DB) Close() error { return d.conn.Close() }
+func (d *DB) Close() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.conn.Close()
+}
+
+// Count returns the number of chunks that have indexed vectors.
+func (d *DB) Count() (int, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	stmt, _, err := d.conn.Prepare(`SELECT COUNT(*) FROM chunks c JOIN vec_chunks v ON v.rowid = c.id`)
+	if err != nil {
+		return 0, err
+	}
+	defer stmt.Close()
+	if !stmt.Step() {
+		return 0, stmt.Err()
+	}
+	return stmt.ColumnInt(0), nil
+}
 
 // ClearSlug removes all chunks (and their vectors) for a given slug.
 func (d *DB) ClearSlug(slug string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	tx, err := d.conn.BeginImmediate()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
 	stmt, _, err := d.conn.Prepare(`SELECT id FROM chunks WHERE slug = ?`)
 	if err != nil {
 		return err
@@ -98,11 +130,27 @@ func (d *DB) ClearSlug(slug string) error {
 	}
 	defer delChunks.Close()
 	delChunks.BindText(1, slug)
-	return delChunks.Exec()
+	if err := delChunks.Exec(); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Insert writes a chunk and its embedding atomically.
 func (d *DB) Insert(c Chunk, embedding []float32) (int64, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if len(embedding) != 768 {
+		return 0, fmt.Errorf("embedding has %d dimensions; want 768", len(embedding))
+	}
+
+	tx, err := d.conn.BeginImmediate()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
 	ins, _, err := d.conn.Prepare(
 		`INSERT INTO chunks (slug, title, date, tags, chunk_idx, content)
 		 VALUES (?, ?, ?, ?, ?, ?)`)
@@ -131,11 +179,17 @@ func (d *DB) Insert(c Chunk, embedding []float32) (int64, error) {
 	if err := vec.Exec(); err != nil {
 		return 0, err
 	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
 	return id, nil
 }
 
 // Search returns the k nearest chunks to the query embedding.
 func (d *DB) Search(query []float32, k int) ([]Result, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	stmt, _, err := d.conn.Prepare(
 		`SELECT rowid, distance FROM vec_chunks
 		 WHERE embedding MATCH ? ORDER BY distance LIMIT ?`)
@@ -169,6 +223,7 @@ func (d *DB) Search(query []float32, k int) ([]Result, error) {
 	return results, nil
 }
 
+// getByID requires d.mu to be held by the caller.
 func (d *DB) getByID(id int64) (Chunk, error) {
 	stmt, _, err := d.conn.Prepare(
 		`SELECT id, slug, title, date, tags, chunk_idx, content FROM chunks WHERE id = ?`)
