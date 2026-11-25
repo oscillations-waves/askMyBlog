@@ -1,13 +1,16 @@
-// Command index walks BLOG_PATH, chunks each post and writes embeddings to DB_PATH.
+// Command index reads local Markdown or published articles and writes embeddings to DB_PATH.
 package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/adrg/frontmatter"
 	"github.com/oscillations-waves/askmyblog-go/internal/chunk"
@@ -22,52 +25,78 @@ type meta struct {
 }
 
 func main() {
-	blogPath := envOr("BLOG_PATH", "../../shravani.roy/src/content/blog")
-	dbPath := envOr("DB_PATH", "./blog.db")
-	apiKey := os.Getenv("GEMINI_API_KEY")
-	if apiKey == "" {
-		log.Fatal("GEMINI_API_KEY is not set")
-	}
-
-	ctx := context.Background()
-	store, err := db.Open(dbPath)
-	if err != nil {
-		log.Fatalf("open db: %v", err)
-	}
-	defer store.Close()
-
-	ec, err := embed.New(ctx, apiKey)
-	if err != nil {
-		log.Fatalf("embed client: %v", err)
-	}
-
-	files, err := findMarkdown(blogPath)
-	if err != nil {
-		log.Fatalf("walk %s: %v", blogPath, err)
-	}
-	if len(files) == 0 {
-		log.Fatalf("no markdown files in %s", blogPath)
-	}
-
-	fmt.Printf("\n🔍 Found %d post(s) in %s\n\n", len(files), blogPath)
-
-	for _, f := range files {
-		if err := indexFile(ctx, store, ec, f); err != nil {
-			log.Printf("  ✗ %s: %v", f, err)
-		}
+	if err := run(context.Background()); err != nil {
+		log.Fatal(err)
 	}
 	fmt.Println("\n✅ Done.")
 }
 
-func indexFile(ctx context.Context, store *db.DB, ec *embed.Client, path string) error {
-	raw, err := os.ReadFile(path)
+func run(ctx context.Context) (err error) {
+	dbPath := envOr("DB_PATH", "./blog.db")
+	apiKey := os.Getenv("GEMINI_API_KEY")
+	if apiKey == "" {
+		return fmt.Errorf("GEMINI_API_KEY is not set")
+	}
+
+	posts, err := loadPosts(ctx)
 	if err != nil {
 		return err
+	}
+	store, err := db.Open(dbPath)
+	if err != nil {
+		return fmt.Errorf("open db: %w", err)
+	}
+	defer func() { err = errors.Join(err, store.Close()) }()
+
+	ec, err := embed.New(ctx, apiKey)
+	if err != nil {
+		return fmt.Errorf("embed client: %w", err)
+	}
+
+	fmt.Printf("\n🔍 Found %d post(s)\n\n", len(posts))
+	for _, entry := range posts {
+		if err := indexPost(ctx, store, ec, entry); err != nil {
+			return fmt.Errorf("index %s: %w", entry.slug, err)
+		}
+	}
+	return nil
+}
+
+func loadPosts(ctx context.Context) ([]post, error) {
+	if site := os.Getenv("BLOG_SITE_URL"); site != "" && os.Getenv("BLOG_PATH") == "" {
+		client := &http.Client{Timeout: 20 * time.Second}
+		return fetchPublishedPosts(ctx, client, site)
+	}
+
+	blogPath := envOr("BLOG_PATH", "../../shravani.roy/src/content/blog")
+	files, err := findMarkdown(blogPath)
+	if err != nil {
+		return nil, fmt.Errorf("walk %s: %w", blogPath, err)
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("no markdown files in %s", blogPath)
+	}
+
+	posts := make([]post, 0, len(files))
+	for _, f := range files {
+		entry, err := readMarkdown(f)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", f, err)
+		}
+		posts = append(posts, entry)
+	}
+	return posts, nil
+}
+
+func readMarkdown(path string) (post, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return post{}, err
 	}
 	var m meta
 	body, err := frontmatter.Parse(strings.NewReader(string(raw)), &m)
 	if err != nil {
-		return fmt.Errorf("frontmatter: %w", err)
+		return post{}, fmt.Errorf("frontmatter: %w", err)
 	}
 
 	slug := filepath.Base(filepath.Dir(path))
@@ -75,20 +104,17 @@ func indexFile(ctx context.Context, store *db.DB, ec *embed.Client, path string)
 	if title == "" {
 		title = slug
 	}
-	date := ""
-	if m.Date != "" {
-		date = m.Date
-	}
-	tags := strings.Join(m.Tags, ", ")
+	return post{slug: slug, title: title, date: m.Date, tags: strings.Join(m.Tags, ", "), text: chunk.StripMarkdown(string(body))}, nil
+}
 
-	plain := chunk.StripMarkdown(string(body))
-	chunks := chunk.Split(plain)
+func indexPost(ctx context.Context, store *db.DB, ec *embed.Client, entry post) error {
+	chunks := chunk.Split(entry.text)
 	if len(chunks) == 0 {
-		fmt.Printf("  ⚠ %s — empty, skipping\n", slug)
+		fmt.Printf("  ⚠ %s — empty, skipping\n", entry.slug)
 		return nil
 	}
 
-	if err := store.ClearSlug(slug); err != nil {
+	if err := store.ClearSlug(entry.slug); err != nil {
 		return fmt.Errorf("clear slug: %w", err)
 	}
 
@@ -107,12 +133,15 @@ func indexFile(ctx context.Context, store *db.DB, ec *embed.Client, path string)
 		if err != nil {
 			return fmt.Errorf("embed batch: %w", err)
 		}
+		if len(embeddings) != len(texts) {
+			return fmt.Errorf("embed batch: got %d vectors for %d chunks", len(embeddings), len(texts))
+		}
 		for j, c := range chunks[i:end] {
 			_, err := store.Insert(db.Chunk{
-				Slug:       slug,
-				Title:      title,
-				Date:       date,
-				Tags:       tags,
+				Slug:       entry.slug,
+				Title:      entry.title,
+				Date:       entry.date,
+				Tags:       entry.tags,
 				ChunkIndex: c.Index,
 				Content:    c.Text,
 			}, embeddings[j])
@@ -122,7 +151,7 @@ func indexFile(ctx context.Context, store *db.DB, ec *embed.Client, path string)
 			inserted++
 		}
 	}
-	fmt.Printf("  ✓ %s — %d chunk(s)\n", slug, inserted)
+	fmt.Printf("  ✓ %s — %d chunk(s)\n", entry.slug, inserted)
 	return nil
 }
 

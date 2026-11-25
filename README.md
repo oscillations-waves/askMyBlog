@@ -68,6 +68,7 @@ curl -N -X POST http://localhost:7860/api/ask \
 | `PORT`            | `7860`                                     | HTTP listen port                                 |
 | `ALLOWED_ORIGIN`  | *(unset → any origin allowed)*             | Comma-separated CORS allowlist                   |
 | `BLOG_PATH`       | `../../shravani.roy/src/content/blog`      | Indexer-only: where to read posts from           |
+| `BLOG_SITE_URL`   | Published portfolio URL in Docker          | Index published articles from RSS when `BLOG_PATH` is unset |
 
 ## Deploying to Hugging Face Spaces
 
@@ -82,9 +83,10 @@ Same flow as the Node version:
    git subtree push --prefix=go-backend hf-go main
    ```
 
-The Dockerfile bakes `blog.db` into the image at build time, then runs a
-~20 MB distroless binary. Cold starts are noticeably faster than the Node
-version.
+On cold start without a database, the indexer discovers blog posts through the
+site's RSS feed and reads each rendered `<article>`. It uses the public website
+and needs no access to the private source repository. A completed index is moved
+into place before the server starts. An existing nonempty database is reused.
 
 ## Why this exists
 

@@ -6,6 +6,7 @@ require (
 	github.com/adrg/frontmatter v0.2.0
 	github.com/asg017/sqlite-vec-go-bindings v0.1.6
 	github.com/ncruces/go-sqlite3 v0.21.3
+	golang.org/x/net v0.53.0
 	google.golang.org/genai v1.58.0
 )
 
@@ -23,7 +24,6 @@ require (
 	github.com/tetratelabs/wazero v1.8.2 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	golang.org/x/crypto v0.51.0 // indirect
-	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/sys v0.44.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240903143218-8af14fe29dc1 // indirect

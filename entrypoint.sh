@@ -1,9 +1,9 @@
 #!/bin/sh
 set -e
 
-# Index the blog on first start (or if the DB is missing).
+# Index the published blog on first start (or if the DB is missing).
 # GEMINI_API_KEY is injected by HF Spaces at runtime, so no build secret needed.
-if [ ! -f "$DB_PATH" ]; then
+if [ ! -s "$DB_PATH" ]; then
   echo "==> blog.db not found, indexing..."
 
   if [ -z "$GEMINI_API_KEY" ]; then
@@ -11,14 +11,16 @@ if [ ! -f "$DB_PATH" ]; then
     exit 1
   fi
 
-  CLONE_DIR="$(mktemp -d)"
-  git clone --depth 1 "${BLOG_REPO}" "${CLONE_DIR}"
-
-  BLOG_PATH="${CLONE_DIR}/src/content/blog" \
-    DB_PATH="${DB_PATH}" \
-    /app/index
-
-  rm -rf "${CLONE_DIR}"
+  TEMP_DB="$(mktemp "${DB_PATH}.tmp.XXXXXX")"
+  trap 'rm -f "$TEMP_DB" "$TEMP_DB-journal"' EXIT
+  trap 'exit 1' HUP INT TERM
+  DB_PATH="$TEMP_DB" /app/index
+  if [ ! -s "$TEMP_DB" ]; then
+    echo "ERROR: indexing did not produce a database." >&2
+    exit 1
+  fi
+  mv -f "$TEMP_DB" "$DB_PATH"
+  trap - EXIT HUP INT TERM
   echo "==> Indexing complete."
 fi
 
